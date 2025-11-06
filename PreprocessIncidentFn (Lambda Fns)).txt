@@ -1,0 +1,129 @@
+import json
+import boto3
+import csv
+import io
+from datetime import datetime
+import os
+from decimal import Decimal
+
+# AWS Clients
+dynamodb = boto3.resource('dynamodb')
+s3 = boto3.client('s3')
+location_client = boto3.client('location')  # AWS Location Service
+
+# Environment Variables
+incident_table = dynamodb.Table(os.environ['INCIDENT_TABLE'])  # 'IncidentDataTable'
+preprocessed_table = dynamodb.Table(os.environ['PREPROCESSED_TABLE'])  # 'PreprocessedTable'
+REFERENCE_BUCKET = os.environ['REFERENCE_BUCKET']  # S3 bucket for state data
+PLACE_INDEX = os.environ['PLACE_INDEX']  # AWS Location Place Index
+
+def geocode_location(location_name):
+    """Use AWS Location Service to get latitude and longitude from a location string."""
+    try:
+        response = location_client.search_place_index_for_text(
+            IndexName=PLACE_INDEX,
+            Text=location_name,
+            MaxResults=1
+        )
+        if response['Results']:
+            lat = response['Results'][0]['Place']['Geometry']['Point'][1]
+            lon = response['Results'][0]['Place']['Geometry']['Point'][0]
+            print(f"Geocoded '{location_name}' to lat={lat}, lon={lon}")
+            return lat, lon
+        else:
+            raise ValueError(f"Could not geocode location: {location_name}")
+    except Exception as e:
+        print(f"Geocoding error: {str(e)}")
+        # fallback coordinates (Mumbai)
+        return 18.94018, 72.83484
+
+def decimal_default(obj):
+    """Convert Decimal to float for JSON serialization."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    raise TypeError
+
+def lambda_handler(event, context):
+    try:
+        print("Fetching incident data from DynamoDB...")
+        response = incident_table.scan()
+        if 'Items' not in response or len(response['Items']) == 0:
+            return {
+                'statusCode': 404,
+                'body': json.dumps({"error": "No incidents found in IncidentDataTable"})
+            }
+
+        incident = response['Items'][0]
+
+        # Extract location from description
+        location_desc = incident.get('description', '')
+        location = location_desc.split('near')[-1].strip() or incident.get('state')
+        latitude, longitude = geocode_location(location)
+        latitude = Decimal(str(latitude))
+        longitude = Decimal(str(longitude))
+
+        # Load reference state data from S3
+        print("Fetching state data from S3...")
+        try:
+            obj = s3.get_object(Bucket=REFERENCE_BUCKET, Key='state_data.csv')
+            rows = csv.DictReader(io.StringIO(obj['Body'].read().decode('utf-8')))
+            state_info = next((r for r in rows if r['state'].lower() == incident['state'].lower()), None)
+        except s3.exceptions.NoSuchKey:
+            raise FileNotFoundError(f"'state_data.csv' does not exist in bucket '{REFERENCE_BUCKET}'")
+        except Exception as e:
+            raise RuntimeError(f"Error fetching file from S3: {str(e)}")
+
+        if not state_info:
+            raise ValueError(f"State {incident['state']} not found in reference data")
+
+        # Enrichment calculations
+        pop_density = Decimal(state_info['population_density'])
+        risk_index = Decimal(state_info['disaster_risk_index'])
+        severity = int(incident['severity'])
+        severity_score_0_1 = Decimal(str(round(severity / 5, 2)))
+        severity_score_1_5 = Decimal(severity)
+        estimated_affected = Decimal(int(pop_density * risk_index * 10))
+        urgency_score = Decimal(str(min(Decimal('1.0'), (severity_score_0_1 + risk_index) / Decimal('2'))))
+        event_cluster_id = f"C{hash(incident['state']) % 1000}"
+        confidence_score = Decimal(str(round(Decimal('1.0') - abs(risk_index - Decimal('0.5')), 2)))
+        current_time = datetime.utcnow().isoformat()
+
+        # Build enriched record
+        enriched_data = {
+            "event_id": incident['incident_id'],
+            "clean_description": incident['description'],
+            "latitude": latitude,
+            "longitude": longitude,
+            "district": incident.get('district'),
+            "state": incident.get('state'),
+            "severity_score_0_1": severity_score_0_1,
+            "severity_score_1_5": severity_score_1_5,
+            "population_density": pop_density,
+            "disaster_risk_index": risk_index,
+            "est_people_affected": estimated_affected,
+            "urgency_score": urgency_score,
+            "event_cluster_id": event_cluster_id,
+            "confidence_score": confidence_score,
+            "standard_timestamp": current_time,
+            "timestamp": current_time
+        }
+
+        # Insert into PreprocessedTable
+        print("Inserting preprocessed data into PreprocessedTable...")
+        preprocessed_table.put_item(Item=enriched_data)
+        print("Preprocessed data inserted successfully into DynamoDB")
+
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                "message": "Incident pre-processed and stored successfully",
+                "item": enriched_data
+            }, default=decimal_default)
+        }
+
+    except Exception as e:
+        print(f"Error processing data: {str(e)}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps({"error": str(e)})
+        }

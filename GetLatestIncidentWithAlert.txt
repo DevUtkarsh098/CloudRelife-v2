@@ -1,0 +1,52 @@
+import json
+import boto3
+from decimal import Decimal
+
+# DynamoDB setup
+dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+table = dynamodb.Table('ProcessedIncidentsTable')
+
+
+def convert_decimal(obj):
+    """Convert DynamoDB Decimal to float/int for JSON serialization"""
+    if isinstance(obj, list):
+        return [convert_decimal(i) for i in obj]
+    elif isinstance(obj, dict):
+        return {k: convert_decimal(v) for k, v in obj.items()}
+    elif isinstance(obj, Decimal):
+        # Convert to int if it's a whole number, else float
+        if obj % 1 == 0:
+            return int(obj)
+        else:
+            return float(obj)
+    return obj
+
+
+def lambda_handler(event, context):
+    try:
+        # Scan to get all items (or ideally use GSI / query in production)
+        response = table.scan()
+        items = response.get("Items", [])
+        if not items:
+            return {
+                "statusCode": 404,
+                "body": json.dumps({"error": "No incidents found"})
+            }
+
+        # Get latest by timestamp
+        latest_item = max(items, key=lambda x: x.get("timestamp", ""))
+        latest_item = convert_decimal(latest_item)
+
+        # Return the same flat JSON structure
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps(latest_item)
+        }
+
+    except Exception as e:
+        print("❌ Error:", str(e))
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
