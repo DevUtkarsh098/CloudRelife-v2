@@ -1,70 +1,183 @@
-# Getting Started with Create React App
+  🌪️ AWS Disaster Data Orchestration Pipeline
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+An intelligent,  event-driven disaster data orchestration system  built entirely on  AWS serverless technologies , designed to process, enrich, and alert on real-time incident data with zero manual intervention.
 
-## Available Scripts
+ 
 
-In the project directory, you can run:
+  📸 Architecture Overview
 
-### `npm start`
+[Refer Architecture.jpg]
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+ 
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+  🧠 End-to-End Workflow
 
-### `npm test`
+1.  User / Field Officer  sends incident data using the  ingestAPI (API Gateway)  via a simple HTTP `PUT` request.
+2.  IngestFn (Lambda)  validates and stores raw incident data in  DynamoDB (IncidentDataTable) .
+3.  EventBridge  detects the DynamoDB insert event and automatically triggers the  Step Functions workflow  — *DisasterPipeline*.
+4. The Step Function orchestrates the data flow through:
+   -  PreprocessIncidentFn  – Cleans and standardizes data.  
+   -  ProcessingFn  – Runs inference through ML model stored in S3 or SageMaker.  
+   -  GetLatestIncidentWithAlert  – Fetches latest processed record and triggers alerts.
+5. Final processed data is stored in  ProcessedIncidentsTable  (DynamoDB).
+6. The  getAPI (API Gateway)  allows external users or dashboards to retrieve the most recent alerts or processed data.
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+ 
 
-### `npm run build`
+  🧩 AWS Services Explained
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+   1.  Amazon API Gateway 
+- Acts as the  entry and exit point  of the system.  
+- Two APIs are deployed:
+  -  ingestAPI (PUT)  → For submitting new incident data.  
+  -  getAPI (GET)  → For retrieving the latest processed incident.
+- Provides authentication, logging, and secure data flow to Lambda.
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+ 
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+   2.  AWS Lambda 
+The serverless compute backbone of this architecture.  
+Each Lambda handles a distinct stage in the pipeline:
 
-### `npm run eject`
+| Lambda Function | Description |
+|      |    --|
+|  IngestFn  | Validates incoming incident data, adds timestamps, and stores it in DynamoDB. |
+|  PreprocessIncidentFn  | Performs text cleaning, formatting, and ensures all attributes (e.g., severity, location) are standardized. |
+|  ProcessingFn  | Invokes the ML inference model (via SageMaker or S3) to enrich the record with severity, urgency, population density, and nearest resources. |
+|  GetLatestIncidentWithAlert  | Retrieves the most recent processed incident, checks alert thresholds, and updates status or pushes notifications to the UI/API. |
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+All Lambdas are written in  Python 3.9 , use  boto3  for AWS integration, and are fully event-driven.
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+ 
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+   3.  AWS Step Functions 
+- Orchestrates the pipeline using a visual workflow.  
+- Ensures  sequential execution  of:
+  1. `IngestFn`
+  2. `PreprocessIncidentFn`
+  3. `ProcessingFn`
+  4. `GetLatestIncidentWithAlert`
+- Provides  retry logic ,  state tracking , and  error handling .  
+- Reduces manual integration complexity between Lambda functions.
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+ 
 
-## Learn More
+   4.  Amazon DynamoDB 
+Two tables are used to manage lifecycle stages of data:
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+| Table | Purpose | Key |
+|  --|   -| --|
+|  IncidentDataTable  | Stores raw incident records submitted by users. | `incident_id` |
+|  ProcessedIncidentsTable  | Stores enriched data after ML inference and alerting. | `incident_id` |
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+- Fully serverless NoSQL database with millisecond latency.  
+- Integrated with EventBridge to trigger the pipeline automatically.
 
-### Code Splitting
+ 
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+   5.  Amazon EventBridge 
+- Watches  DynamoDB stream events  (INSERT operations).  
+- When a new record is added to `IncidentDataTable`, it triggers the  Step Function execution .  
+- Enables a completely  automated, event-driven pipeline  without any human intervention.
 
-### Analyzing the Bundle Size
+ 
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+   6.  Amazon S3 (disaster-reference-data) 
+- Stores:
+  -  Reference datasets  (like disaster risk indices, population maps, and resource locations).  
+  -  Pre-trained inference model  used by the `ProcessingFn` Lambda.  
+- S3 paths are read dynamically during Lambda execution for flexibility and model updates.
 
-### Making a Progressive Web App
+ 
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
+   7.  Amazon SageMaker 
+- Hosts or trains the  disaster severity inference model .
+- The model predicts:
+  - Severity score (1–5)
+  - Urgency level
+  - Estimated people affected
+  - Disaster risk index
+- The output is combined with location-based resources from S3 and stored back in DynamoDB.
 
-### Advanced Configuration
+ 
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
+   8.  Amazon CloudWatch 
+- Centralized monitoring and logging.
+- Tracks Lambda invocations, Step Function executions, and errors.  
+- Alerts can be configured to notify via  SNS  for operational monitoring.
 
-### Deployment
+ 
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
+  ⚙️ Step Function Definition
 
-### `npm run build` fails to minify
+```json
+{
+  "Comment": "Disaster Response Data Pipeline",
+  "StartAt": "IngestFn",
+  "States": {
+    "IngestFn": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:043470661911:function:IngestFn",
+      "Next": "PreprocessIncidentFn"
+    },
+    "PreprocessIncidentFn": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:043470661911:function:PreprocessIncidentFn",
+      "Next": "ProcessingFn"
+    },
+    "ProcessingFn": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:043470661911:function:ProcessingFn",
+      "Next": "GetLatestIncidentWithAlert"
+    },
+    "GetLatestIncidentWithAlert": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:043470661911:function:GetLatestIncidentWithAlert",
+      "End": true
+    }
+  }
+}
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+🧰 Tools & Technologies
+
+AWS Lambda
+
+AWS Step Functions
+
+Amazon DynamoDB
+
+Amazon S3
+
+Amazon SageMaker
+
+Amazon EventBridge
+
+API Gateway
+
+Amazon CloudWatch
+
+Python (boto3, json, datetime)
+
+
+
+🧭 Key Features
+
+✅ 100% Serverless and Event-driven
+✅ Auto-triggered pipeline (no manual runs)
+✅ Real-time alerting and data enrichment
+✅ ML-powered severity and urgency scoring
+✅ Modular design — each Lambda handles a single task
+
+
+
+
+
+💡 Future Enhancements
+
+Real-time alerts via SNS / WebSocket API
+
+Integration with AWS QuickSight dashboards
+
+Cross-region disaster coordination
+
+Batch analytics for historical trend visualization
